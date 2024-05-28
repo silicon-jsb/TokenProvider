@@ -1,23 +1,21 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
-using Microsoft.EntityFrameworkCore.Storage.Json;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
-using System.Net;
 using TokenProvider.Infrastructure.Models;
 using TokenProvider.Infrastructure.Services;
 
 namespace TokenProvider.Functions
 {
-    public class GenerateToken(ILogger<GenerateToken> logger, IRefreshTokenService refreshTokenService, ITokenGenerator tokenGenerator)
+    public class RefreshTokens(ILogger<GenerateToken> logger, IRefreshTokenService refreshTokenService, ITokenGenerator tokenGenerator)
     {
         private readonly ILogger<GenerateToken> _logger = logger;
         private readonly IRefreshTokenService _refreshTokenService = refreshTokenService;
         private readonly ITokenGenerator _tokenGenerator = tokenGenerator;
 
-        [Function("GenerateToken")]
-        public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Function, "post", Route = "token/generate")] HttpRequest req)
+        [Function("RefreshTokens")]
+        public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Function, "post", Route = "token/refresh")] HttpRequest req)
         {
 
             var body = await new StreamReader(req.Body).ReadToEndAsync();
@@ -35,18 +33,29 @@ namespace TokenProvider.Functions
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctsTimeout.Token, req.HttpContext.RequestAborted);
 
                 req.HttpContext.Request.Cookies.TryGetValue("refreshToken", out var refreshToken);
+                
+                if (string.IsNullOrEmpty(refreshToken))
+                    return new UnauthorizedObjectResult(new { Error = "Refresh token was not found." });
+
                 if (!string.IsNullOrEmpty(refreshToken))
+                {
                     refreshTokenResult = await _refreshTokenService.GetRefreshTokenAsync(refreshToken, cts.Token);
 
-                if (refreshTokenResult == null || refreshTokenResult.ExpiryDate < DateTime.Now.AddDays(1))
-                    refreshTokenResult = await _tokenGenerator.GenerateRefreshTokenAsync(tokenRequest.UserId, cts.Token);
+                    if (refreshTokenResult.ExpiryDate < DateTime.Now)
+                        return new UnauthorizedObjectResult(new { Error = "Refresh token has expired." });
 
-                accessTokenResult = _tokenGenerator.GenerateAccessToken(tokenRequest, refreshTokenResult.Token);
-                if (accessTokenResult != null && accessTokenResult.Token != null && refreshTokenResult.Token != null && refreshTokenResult.CookieOptions != null)
-                {
-                    req.HttpContext.Response.Cookies.Append("refreshToken", refreshTokenResult.Token, refreshTokenResult.CookieOptions);
-                    return new ObjectResult(new { AccessToken = accessTokenResult.Token, RefreshToken = refreshTokenResult.Token });
+                    if (refreshTokenResult.ExpiryDate < DateTime.Now.AddDays(1))
+                        refreshTokenResult = await _tokenGenerator.GenerateRefreshTokenAsync(tokenRequest.UserId, cts.Token);
+
+                    accessTokenResult = _tokenGenerator.GenerateAccessToken(tokenRequest, refreshTokenResult.Token);
+
+                    if (accessTokenResult != null && accessTokenResult.Token != null && refreshTokenResult.Token != null && refreshTokenResult.CookieOptions != null)
+                    {
+                        req.HttpContext.Response.Cookies.Append("refreshToken", refreshTokenResult.Token, refreshTokenResult.CookieOptions);
+                        return new ObjectResult(new { AccessToken = accessTokenResult.Token, RefreshToken = refreshTokenResult.Token });
+                    }
                 }
+   
             }
             catch (Exception ex)
             {
